@@ -21,7 +21,9 @@ service cloud.firestore {
     match /pairs/{pairId} {
       // Anyone signed in may fetch an UNCLAIMED pair by its (unguessable, 8-char) id in
       // order to join it. Listing/querying is never allowed.
+      // (resource == null: a missing doc reads as "not found" instead of "permission denied".)
       allow get: if signedIn() && (
+        resource == null ||
         resource.data.guardedUid == null ||
         resource.data.guardianUid == request.auth.uid ||
         resource.data.guardedUid == request.auth.uid

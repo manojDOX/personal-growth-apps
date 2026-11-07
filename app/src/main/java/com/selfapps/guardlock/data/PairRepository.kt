@@ -5,6 +5,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.selfapps.guardlock.lock.Perms
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -59,11 +60,28 @@ object PairRepository {
         require(code.length == CODE_LENGTH) { "Enter the $CODE_LENGTH-character code" }
         val uid = uid()
         val ref = pairs().document(code)
-        val snap = ref.get().await()
+        // The rules deny reading a pair that another phone already claimed.
+        val snap = try {
+            ref.get().await()
+        } catch (e: FirebaseFirestoreException) {
+            if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                error("That code is already used by another phone. Ask your guardian for a new code.")
+            }
+            throw e
+        }
         check(snap.exists()) { "No pairing found for that code" }
         val existing = snap.getString("guardedUid")
         check(existing == null || existing == uid) { "That code is already used by another phone" }
-        if (existing == null) ref.update("guardedUid", uid).await()
+        if (existing == null) {
+            try {
+                ref.update("guardedUid", uid).await()
+            } catch (e: FirebaseFirestoreException) {
+                if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                    error("The server refused the pairing (code already claimed?). Ask for a new code.")
+                }
+                throw e
+            }
+        }
         code
     }
 
