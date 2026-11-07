@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">GuardLock</string>
+    <string name="accessibility_description">GuardLock notices which app has just opened so it can show a lock screen over apps your guardian has locked. It does not read what is on your screen.</string>
+</resources>

@@ -1,0 +1,74 @@
+rules_version = '2';
+
+// Enforces "easy to lock, hard to unlock" on the SERVER, so a modified guarded-side APK
+// cannot cheat: the guarded user can only add locks, never loosen or remove them.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function pairData(pairId) {
+      return get(/databases/$(database)/documents/pairs/$(pairId)).data;
+    }
+    function isGuardianOf(pairId) {
+      return signedIn() && pairData(pairId).guardianUid == request.auth.uid;
+    }
+    function isGuardedOf(pairId) {
+      return signedIn() && pairData(pairId).guardedUid == request.auth.uid;
+    }
+
+    match /pairs/{pairId} {
+      // Anyone signed in may fetch an UNCLAIMED pair by its (unguessable, 8-char) id in
+      // order to join it. Listing/querying is never allowed.
+      allow get: if signedIn() && (
+        resource.data.guardedUid == null ||
+        resource.data.guardianUid == request.auth.uid ||
+        resource.data.guardedUid == request.auth.uid
+      );
+      allow list: if false;
+
+      allow create: if signedIn()
+        && request.resource.data.guardianUid == request.auth.uid
+        && request.resource.data.guardedUid == null
+        && request.resource.data.keys().hasOnly(['guardianUid', 'guardedUid', 'createdAt', 'health']);
+
+      allow update: if signedIn() && (
+        // guardian: anything except changing who the guardian is
+        (resource.data.guardianUid == request.auth.uid
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['guardianUid']))
+        // friend joins an unclaimed pair
+        || (resource.data.guardedUid == null
+          && request.resource.data.guardedUid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['guardedUid']))
+        // guarded phone reports heartbeat / health only
+        || (resource.data.guardedUid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['health']))
+      );
+
+      allow delete: if false;
+    }
+
+    match /pairs/{pairId}/apps/{pkg} {
+      allow read: if isGuardianOf(pairId) || isGuardedOf(pairId);
+
+      allow create: if isGuardianOf(pairId) || (
+        isGuardedOf(pairId)
+        && request.resource.data.keys().hasOnly(['name', 'addedBy', 'locked', 'unlockUntil'])
+        && request.resource.data.addedBy == 'guarded'
+        && request.resource.data.locked == true
+        && request.resource.data.get('unlockUntil', null) == null
+      );
+
+      // Guarded side may only (re)lock: locked must end up true with no open window.
+      allow update: if isGuardianOf(pairId) || (
+        isGuardedOf(pairId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'locked', 'unlockUntil'])
+        && request.resource.data.locked == true
+        && request.resource.data.get('unlockUntil', null) == null
+      );
+
+      allow delete: if isGuardianOf(pairId);
+    }
+  }
+}
