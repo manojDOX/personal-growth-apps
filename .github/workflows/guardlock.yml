@@ -30,7 +30,9 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      # The runner image already has the Android SDK. Only accept licenses so AGP can fetch extras.
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       # The Gradle wrapper isn't committed, so install the pinned Gradle version directly.
       - uses: gradle/actions/setup-gradle@v4
@@ -64,7 +66,9 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      # The runner image already has the Android SDK. Only accept licenses so AGP can fetch extras.
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - uses: gradle/actions/setup-gradle@v4
         with:
