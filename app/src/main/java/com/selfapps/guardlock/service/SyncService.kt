@@ -14,10 +14,10 @@ import androidx.core.content.ContextCompat
 import com.selfapps.guardlock.GuardLockApp
 import com.selfapps.guardlock.data.PairRepository
 import com.selfapps.guardlock.data.Prefs
-import com.selfapps.guardlock.data.Role
 import com.selfapps.guardlock.lock.LockEngine
 import com.selfapps.guardlock.lock.Perms
 import com.selfapps.guardlock.ui.MainActivity
+import com.selfapps.guardlock.usage.UsageSync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,9 +28,10 @@ import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 
 /**
- * Runs on the GUARDED phone. Keeps a live Firestore listener on the lock rules so a guardian's
- * Lock/Unlock lands within a second or two, and keeps the process alive via a foreground
- * notification. Rules are cached in [LockEngine]/[Prefs] so locking still works offline.
+ * Runs on EVERY paired phone (each phone is guarded by the other). Keeps a live Firestore listener
+ * on the lock rules for THIS phone so a partner's Lock/Unlock lands within a second or two, and
+ * keeps the process alive via a foreground notification. Rules are cached in
+ * [LockEngine]/[Prefs] so locking still works offline.
  */
 class SyncService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -43,14 +44,15 @@ class SyncService : Service() {
             this, NOTIF_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
         val pairId = Prefs.pairId
-        if (Prefs.role != Role.GUARDED || pairId == null) {
+        if (pairId == null) {
             stopSelf()
             return START_NOT_STICKY
         }
         if (job == null) {
             job = scope.launch {
                 launch {
-                    PairRepository.appsFlow(pairId)
+                    val me = awaitUid()
+                    PairRepository.appsFlow(pairId, me)
                         .retryWhen { cause, attempt ->
                             Log.w(TAG, "rules listener failed, retrying", cause)
                             delay(minOf(60_000L, 2_000L * (attempt + 1)))
@@ -61,11 +63,24 @@ class SyncService : Service() {
                 launch {
                     runCatching {
                         PairRepository.sendHeartbeat(pairId, Perms.snapshot(this@SyncService))
-                    }.onFailure { Log.w(TAG, "heartbeat failed", it) }
+                        UsageSync.push(this@SyncService)
+                    }.onFailure { Log.w(TAG, "heartbeat/usage upload failed", it) }
                 }
             }
         }
         return START_STICKY
+    }
+
+    /** The anonymous identity is stored on the phone, but the very first sign-in needs internet. */
+    private suspend fun awaitUid(): String {
+        while (true) {
+            try {
+                return PairRepository.uid()
+            } catch (e: Exception) {
+                Log.w(TAG, "sign-in failed, retrying", e)
+                delay(5_000)
+            }
+        }
     }
 
     private fun buildNotification(): Notification {
@@ -75,7 +90,7 @@ class SyncService : Service() {
         return NotificationCompat.Builder(this, GuardLockApp.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentTitle("GuardLock is active")
-            .setContentText("Your guardian's lock rules are being enforced")
+            .setContentText("Your partner's lock rules are being enforced")
             .setOngoing(true)
             .setContentIntent(tap)
             .build()
@@ -92,6 +107,10 @@ class SyncService : Service() {
 
         fun start(ctx: Context) {
             ContextCompat.startForegroundService(ctx, Intent(ctx, SyncService::class.java))
+        }
+
+        fun stop(ctx: Context) {
+            ctx.stopService(Intent(ctx, SyncService::class.java))
         }
     }
 }

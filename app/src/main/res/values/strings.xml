@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">GuardLock</string>
-    <string name="accessibility_description">GuardLock notices which app has just opened so it can show a lock screen over apps your guardian has locked. It does not read what is on your screen.</string>
+    <string name="accessibility_description">GuardLock notices which app has just opened so it can show a lock screen over apps your partner has locked. It also looks at Settings screens only to block adding new users or profiles. It does not read or send anything else on your screen.</string>
 </resources>

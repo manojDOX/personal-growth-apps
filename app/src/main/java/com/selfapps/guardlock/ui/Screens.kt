@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,7 +34,11 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,9 +66,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.selfapps.guardlock.data.AppRule
 import com.selfapps.guardlock.data.Health
 import com.selfapps.guardlock.data.InstalledApp
-import com.selfapps.guardlock.data.PairInfo
 import com.selfapps.guardlock.data.PairRepository
-import com.selfapps.guardlock.data.Role
 import com.selfapps.guardlock.lock.Apps
 import com.selfapps.guardlock.lock.Perms
 import com.selfapps.guardlock.service.GuardDeviceAdmin
@@ -74,120 +77,193 @@ import java.util.Locale
 
 private val Green = Color(0xFF2E7D32)
 private val Amber = Color(0xFFF9A825)
-private val Red = Color(0xFFC62828)
+internal val Red = Color(0xFFC62828)
 private val Grey = Color(0xFF757575)
 
 // ============================================================ onboarding
 
 @Composable
-fun RoleSelectScreen(vm: MainViewModel) {
+fun StartScreen(vm: MainViewModel) {
+    var code by remember { mutableStateOf("") }
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
         Text("GuardLock", style = MaterialTheme.typography.headlineLarge)
         Spacer(Modifier.height(8.dp))
-        Text("Who are you on this phone?")
+        Text(
+            "You and your friend guard each other. Each of you can lock apps on the other's phone, " +
+                "and you both see each other's screen time."
+        )
         Spacer(Modifier.height(24.dp))
-        Button(onClick = { vm.chooseRole(Role.GUARDIAN) }, Modifier.fillMaxWidth()) {
-            Text("I'm the guardian")
+        Button(onClick = { vm.createPair() }, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Start - make my pairing code")
         }
         Text(
-            "You hold the keys: you lock and unlock apps on your friend's phone.",
+            "Do this on ONE phone. Then read the code to your friend.",
             style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 4.dp, bottom = 20.dp),
+            modifier = Modifier.padding(top = 4.dp, bottom = 24.dp),
         )
-        Button(onClick = { vm.chooseRole(Role.GUARDED) }, Modifier.fillMaxWidth()) {
-            Text("I'm being guarded")
-        }
-        Text(
-            "You choose apps to lock. Only your guardian can unlock them. " +
-                "This choice can't be undone from the app.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-        if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 16.dp))
-        vm.error?.let { ErrorText(it) }
-    }
-}
-
-@Composable
-fun JoinScreen(vm: MainViewModel) {
-    var code by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
-        Text("Enter pairing code", style = MaterialTheme.typography.headlineMedium)
+        Text("Already have a code from your friend?", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(8.dp))
-        Text("Ask your guardian to open GuardLock on their phone and read you the ${PairRepository.CODE_LENGTH}-character code.")
-        Spacer(Modifier.height(16.dp))
         OutlinedTextField(
             value = code,
             onValueChange = { code = it.uppercase().take(PairRepository.CODE_LENGTH + 1) },
-            label = { Text("Code") },
+            label = { Text("${PairRepository.CODE_LENGTH}-character code") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        Spacer(Modifier.height(16.dp))
-        Button(onClick = { vm.join(code) }, enabled = !vm.busy && code.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-            Text("Pair")
-        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = { vm.join(code) },
+            enabled = !vm.busy && code.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Pair with my friend") }
         if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 16.dp))
         vm.error?.let { ErrorText(it) }
     }
 }
 
-// ============================================================ guardian
+// ============================================================ home (3 tabs)
 
 @Composable
-fun GuardianScreen(vm: MainViewModel) {
+fun HomeScreen(vm: MainViewModel) {
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshMyUsage() }
+    val tabs = listOf("My phone" to "📱", "Partner" to "🛡️", "Compare" to "📊")
+    val noInsets = WindowInsets(0, 0, 0, 0)
+
+    Scaffold(
+        contentWindowInsets = noInsets,
+        bottomBar = {
+            NavigationBar(windowInsets = noInsets) {
+                tabs.forEachIndexed { i, (label, icon) ->
+                    NavigationBarItem(
+                        selected = vm.tab == i,
+                        onClick = { vm.tab = i },
+                        icon = { Text(icon) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+        },
+    ) { pad ->
+        Box(Modifier.padding(pad).fillMaxSize()) {
+            when (vm.tab) {
+                0 -> MyPhoneTab(vm)
+                1 -> PartnerTab(vm)
+                else -> CompareTab(vm)
+            }
+        }
+    }
+}
+
+// ============================================================ tab 1: my phone (I may only add locks)
+
+@Composable
+private fun MyPhoneTab(vm: MainViewModel) {
+    val apps by vm.myApps.collectAsState()
     val pair by vm.pair.collectAsState()
-    val apps by vm.apps.collectAsState()
-    val id = vm.pairId
+    var picking by remember { mutableStateOf(false) }
+
+    if (picking) {
+        AppPickerScreen(
+            existing = apps.map { it.pkg }.toSet(),
+            onDone = { chosen ->
+                picking = false
+                if (chosen.isNotEmpty()) vm.addMyApps(chosen)
+            },
+        )
+        return
+    }
 
     LazyColumn(
         Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { Text("Guardian", style = MaterialTheme.typography.headlineMedium) }
+        item { Text("My phone", style = MaterialTheme.typography.headlineMedium) }
         if (vm.busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         vm.error?.let { e -> item { ErrorText(e) } }
-
-        if (id == null) {
-            item { Button(onClick = { vm.createPair() }, enabled = !vm.busy) { Text("Create pairing code") } }
-        } else {
-            item { PairCard(id, pair) }
-            item { HealthCard(pair) }
-            item { Text("Locked apps", style = MaterialTheme.typography.titleMedium) }
-            if (apps.isEmpty()) {
-                item { Text("Nothing yet. Apps your friend chooses to lock will show up here.") }
+        if (pair?.joinerUid == null) vm.pairId?.let { id -> item { PairCard(id) } }
+        item { SetupCard() }
+        item { Button(onClick = { picking = true }, Modifier.fillMaxWidth()) { Text("Add apps to lock") } }
+        item { Text("Locked on this phone", style = MaterialTheme.typography.titleMedium) }
+        if (apps.isEmpty()) item { Text("No apps locked yet.") }
+        items(apps, key = { it.pkg }) { rule ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(rule.name, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        when {
+                            !rule.locked -> "Released by your partner"
+                            rule.isTemporarilyOpen() -> "Open until ${clock(rule.unlockUntil!!)}"
+                            else -> "Locked"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
-            items(apps, key = { it.pkg }) { GuardianAppRow(it, vm) }
+        }
+        item {
+            Text(
+                "Only your partner can unlock or remove an app on this phone.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (apps.none { it.locked }) {
             item { TextButton(onClick = { vm.unpair() }) { Text("Unpair (dev only)") } }
         }
     }
 }
 
+// ============================================================ tab 2: partner's phone (I hold the keys)
+
 @Composable
-private fun PairCard(code: String, pair: PairInfo?) {
+private fun PartnerTab(vm: MainViewModel) {
+    val pair by vm.pair.collectAsState()
+    val apps by vm.peerApps.collectAsState()
+    val health by vm.peerHealth.collectAsState()
+    val joined = pair?.joinerUid != null
+
+    LazyColumn(
+        Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item { Text("Partner's phone", style = MaterialTheme.typography.headlineMedium) }
+        if (vm.busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+        vm.error?.let { e -> item { ErrorText(e) } }
+
+        if (!joined) {
+            vm.pairId?.let { id -> item { PairCard(id) } }
+            item { Text("Your friend has not joined yet. Read them the code above.") }
+        } else {
+            item { HealthCard(health) }
+            item { Text("Locked on their phone", style = MaterialTheme.typography.titleMedium) }
+            if (apps.isEmpty()) {
+                item { Text("Nothing yet. Apps your friend chooses to lock will show up here.") }
+            }
+            items(apps, key = { it.pkg }) { PartnerAppRow(it, vm) }
+        }
+    }
+}
+
+@Composable
+private fun PairCard(code: String) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Text("Pairing code", style = MaterialTheme.typography.labelLarge)
+            Text("Your pairing code", style = MaterialTheme.typography.labelLarge)
             Text(
                 code.chunked(4).joinToString("-"),
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
             )
-            Text(
-                if (pair?.guardedUid == null) "Waiting for your friend to enter this code…"
-                else "Paired ✓",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            Text("Waiting for your friend to enter this code…", style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
 
 @Composable
-private fun HealthCard(pair: PairInfo?) {
+private fun HealthCard(h: Health?) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -195,13 +271,11 @@ private fun HealthCard(pair: PairInfo?) {
             now = System.currentTimeMillis()
         }
     }
-    val h = pair?.health ?: Health(null, false, false, false, false)
-    val ageMin = h.lastHeartbeat?.let { (now - it) / 60_000 }
+    val ageMin = h?.lastHeartbeat?.let { (now - it) / 60_000 }
 
     val (label, color) = when {
-        pair?.guardedUid == null -> "Not paired yet" to Grey
-        ageMin == null -> "No check-in from their phone yet" to Amber
-        ageMin > 45 -> "Offline for ${ageMin} min - protection may be off" to Red
+        h == null || ageMin == null -> "No check-in from their phone yet" to Amber
+        ageMin > 45 -> "Offline for $ageMin min - protection may be off" to Red
         !h.accessibilityOn -> "Lock service is switched OFF" to Red
         !h.batteryExempt || !h.deviceAdmin || !h.notificationsOn -> "Protected, but weakened" to Amber
         else -> "Protected" to Green
@@ -214,11 +288,19 @@ private fun HealthCard(pair: PairInfo?) {
                 Spacer(Modifier.width(8.dp))
                 Text(label, style = MaterialTheme.typography.titleMedium)
             }
-            if (pair?.guardedUid != null && ageMin != null) {
+            if (h != null && ageMin != null) {
                 Spacer(Modifier.height(6.dp))
                 Text("Last check-in: ${if (ageMin < 1) "just now" else "$ageMin min ago"}")
-                Text("Lock service ${tick(h.accessibilityOn)}   Battery ${tick(h.batteryExempt)}   " +
-                    "Uninstall guard ${tick(h.deviceAdmin)}", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Lock service ${tick(h.accessibilityOn)}   Battery ${tick(h.batteryExempt)}   " +
+                        "Uninstall guard ${tick(h.deviceAdmin)}   Screen time ${tick(h.usageAccess)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    if (h.hardened) "Strong mode ON: new users, profiles and safe mode are blocked by Android."
+                    else "Strong mode off: new users are blocked only on Settings screens (basic).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }
@@ -226,12 +308,14 @@ private fun HealthCard(pair: PairInfo?) {
 
 private fun tick(ok: Boolean) = if (ok) "✓" else "✗"
 
+private fun clock(millis: Long): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))
+
 @Composable
-private fun GuardianAppRow(rule: AppRule, vm: MainViewModel) {
+private fun PartnerAppRow(rule: AppRule, vm: MainViewModel) {
     var menu by remember { mutableStateOf(false) }
     val status = when {
         !rule.locked -> "Unlocked"
-        rule.isTemporarilyOpen() -> "Open until ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(rule.unlockUntil!!))}"
+        rule.isTemporarilyOpen() -> "Open until ${clock(rule.unlockUntil!!)}"
         else -> "Locked"
     }
     Card(Modifier.fillMaxWidth()) {
@@ -258,59 +342,7 @@ private fun GuardianAppRow(rule: AppRule, vm: MainViewModel) {
     }
 }
 
-// ============================================================ guarded
-
-@Composable
-fun GuardedScreen(vm: MainViewModel) {
-    val apps by vm.apps.collectAsState()
-    var picking by remember { mutableStateOf(false) }
-
-    if (picking) {
-        AppPickerScreen(
-            existing = apps.map { it.pkg }.toSet(),
-            onDone = { chosen ->
-                picking = false
-                if (chosen.isNotEmpty()) vm.addApps(chosen)
-            },
-        )
-    } else {
-        LazyColumn(
-            Modifier.fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item { Text("GuardLock", style = MaterialTheme.typography.headlineMedium) }
-            if (vm.busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            vm.error?.let { e -> item { ErrorText(e) } }
-            item { SetupCard() }
-            item {
-                Button(onClick = { picking = true }, Modifier.fillMaxWidth()) { Text("Add apps to lock") }
-            }
-            item { Text("Locked apps", style = MaterialTheme.typography.titleMedium) }
-            if (apps.isEmpty()) item { Text("No apps locked yet.") }
-            items(apps, key = { it.pkg }) { rule ->
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text(rule.name, style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            when {
-                                !rule.locked -> "Released by your guardian"
-                                rule.isTemporarilyOpen() -> "Open until ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(rule.unlockUntil!!))}"
-                                else -> "Locked"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-            item {
-                Text(
-                    "Only your guardian can unlock or remove an app.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-    }
-}
+// ============================================================ setup + picker
 
 @Composable
 private fun SetupCard() {
@@ -336,6 +368,12 @@ private fun SetupCard() {
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            SetupRow("Screen time (Usage access)", s.usageAccess) {
+                ctx.startActivity(
+                    Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                        .setData(Uri.parse("package:${ctx.packageName}"))
+                )
+            }
             SetupRow("Notifications", s.notifications) {
                 if (Build.VERSION.SDK_INT >= 33) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 else ctx.startActivity(
@@ -356,6 +394,12 @@ private fun SetupCard() {
                         .putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Stops GuardLock being uninstalled without turning this off first.")
                 )
             }
+            Text(
+                if (s.hardened) "Strong mode ON ✓ - Android blocks new users, profiles and safe mode."
+                else "Strong mode off (optional): needs a one-time USB command, see the README. " +
+                    "Without it, adding users is blocked only on Settings screens.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -397,7 +441,7 @@ private fun AppPickerScreen(existing: Set<String>, onDone: (List<InstalledApp>) 
             }
         }
         Text(
-            "Once locked, only your guardian can unlock or remove an app.",
+            "Once locked, only your partner can unlock or remove an app.",
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
@@ -412,6 +456,6 @@ private fun AppPickerScreen(existing: Set<String>, onDone: (List<InstalledApp>) 
 // ============================================================ shared
 
 @Composable
-private fun ErrorText(msg: String) {
+internal fun ErrorText(msg: String) {
     Text(msg, color = Red, modifier = Modifier.padding(top = 8.dp))
 }

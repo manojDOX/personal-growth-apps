@@ -91,7 +91,7 @@ private fun LockScreen(pkg: String, onHome: () -> Unit, onUnlocked: () -> Unit) 
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(8.dp))
-        Text("Your guardian controls this lock.", textAlign = TextAlign.Center)
+        Text("Your partner controls this lock.", textAlign = TextAlign.Center)
         Spacer(Modifier.height(32.dp))
         Button(onClick = onHome) { Text("Go home") }
     }

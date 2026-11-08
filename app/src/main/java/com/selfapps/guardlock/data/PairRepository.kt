@@ -2,10 +2,14 @@ package com.selfapps.guardlock.data
 
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import com.selfapps.guardlock.lock.Perms
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -17,14 +21,19 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.security.SecureRandom
 
 /**
- * All Firestore access. No server code: the security rules in firestore.rules are what
- * stop the guarded phone from loosening locks.
+ * All Firestore access. No server code: the security rules in firestore.rules are what stop a
+ * phone's owner from loosening the locks their partner set.
+ *
+ * Layout: pairs/{id}/phones/{uid}[/apps/{pkg} | /usage/{date}]. "phone" is always the uid of the
+ * phone the data is ABOUT. Both members of a pair can read it; the rules decide who can write.
  */
 object PairRepository {
     private val auth get() = FirebaseAuth.getInstance()
     private val db get() = FirebaseFirestore.getInstance()
     private fun pairs() = db.collection("pairs")
-    private fun apps(pairId: String) = pairs().document(pairId).collection("apps")
+    private fun phone(pairId: String, uid: String): DocumentReference =
+        pairs().document(pairId).collection("phones").document(uid)
+    private fun apps(pairId: String, uid: String) = phone(pairId, uid).collection("apps")
 
     // No 0/O/1/I so the code is easy to read out loud.
     private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -46,10 +55,9 @@ object PairRepository {
         val code = buildString { repeat(CODE_LENGTH) { append(ALPHABET[rnd.nextInt(ALPHABET.length)]) } }
         pairs().document(code).set(
             mapOf(
-                "guardianUid" to uid,
-                "guardedUid" to null,
+                "a" to uid,
+                "b" to null,
                 "createdAt" to FieldValue.serverTimestamp(),
-                "health" to emptyMap<String, Any>(),
             )
         ).await()
         code
@@ -60,21 +68,23 @@ object PairRepository {
         require(code.length == CODE_LENGTH) { "Enter the $CODE_LENGTH-character code" }
         val uid = uid()
         val ref = pairs().document(code)
-        // The rules deny reading a pair that another phone already claimed.
+        // The rules deny reading a pair that two phones already share.
         val snap = try {
             ref.get().await()
         } catch (e: FirebaseFirestoreException) {
             if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
-                error("That code is already used by another phone. Ask your guardian for a new code.")
+                error("That code is already used by two phones. Ask your friend for a new code.")
             }
             throw e
         }
         check(snap.exists()) { "No pairing found for that code" }
-        val existing = snap.getString("guardedUid")
-        check(existing == null || existing == uid) { "That code is already used by another phone" }
-        if (existing == null) {
+        val a = snap.getString("a")
+        val b = snap.getString("b")
+        check(a != uid || b != null) { "That is your own code. Enter the code from your friend's phone." }
+        check(b == null || b == uid || a == uid) { "That code is already used by two phones" }
+        if (b == null && a != uid) {
             try {
-                ref.update("guardedUid", uid).await()
+                ref.update("b", uid).await()
             } catch (e: FirebaseFirestoreException) {
                 if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
                     error("The server refused the pairing (code already claimed?). Ask for a new code.")
@@ -92,9 +102,21 @@ object PairRepository {
         emitAll(rawPairFlow(pairId))
     }
 
-    fun appsFlow(pairId: String): Flow<List<AppRule>> = flow {
+    /** Apps locked ON [phoneUid]. */
+    fun appsFlow(pairId: String, phoneUid: String): Flow<List<AppRule>> = flow {
         uid()
-        emitAll(rawAppsFlow(pairId))
+        emitAll(rawAppsFlow(pairId, phoneUid))
+    }
+
+    fun healthFlow(pairId: String, phoneUid: String): Flow<Health?> = flow {
+        uid()
+        emitAll(rawHealthFlow(pairId, phoneUid))
+    }
+
+    /** Newest 7 days of screen time for [phoneUid]. */
+    fun usageFlow(pairId: String, phoneUid: String): Flow<List<UsageDay>> = flow {
+        uid()
+        emitAll(rawUsageFlow(pairId, phoneUid))
     }
 
     private fun rawPairFlow(pairId: String): Flow<PairInfo?> = callbackFlow {
@@ -108,8 +130,8 @@ object PairRepository {
         awaitClose { reg.remove() }
     }
 
-    private fun rawAppsFlow(pairId: String): Flow<List<AppRule>> = callbackFlow {
-        val reg = apps(pairId).addSnapshotListener { snap, err ->
+    private fun rawAppsFlow(pairId: String, phoneUid: String): Flow<List<AppRule>> = callbackFlow {
+        val reg = apps(pairId, phoneUid).addSnapshotListener { snap, err ->
             if (err != null) {
                 close(err)
                 return@addSnapshotListener
@@ -121,41 +143,82 @@ object PairRepository {
         awaitClose { reg.remove() }
     }
 
+    private fun rawHealthFlow(pairId: String, phoneUid: String): Flow<Health?> = callbackFlow {
+        val reg = phone(pairId, phoneUid).addSnapshotListener { snap, err ->
+            if (err != null) {
+                close(err)
+                return@addSnapshotListener
+            }
+            trySend(snap?.toHealth())
+        }
+        awaitClose { reg.remove() }
+    }
+
+    private fun rawUsageFlow(pairId: String, phoneUid: String): Flow<List<UsageDay>> = callbackFlow {
+        val reg = phone(pairId, phoneUid).collection("usage")
+            .orderBy(FieldPath.documentId(), Query.Direction.DESCENDING)
+            .limit(7)
+            .addSnapshotListener { snap, err ->
+                if (err != null) {
+                    close(err)
+                    return@addSnapshotListener
+                }
+                if (snap != null) trySend(snap.documents.map { it.toUsageDay() })
+            }
+        awaitClose { reg.remove() }
+    }
+
     // ---------- mutations ----------
 
-    suspend fun addApp(pairId: String, pkg: String, name: String, addedBy: String) = net {
-        apps(pairId).document(pkg).set(
-            mapOf("name" to name, "addedBy" to addedBy, "locked" to true, "unlockUntil" to null)
+    /** Owner adds a lock on their OWN phone. */
+    suspend fun addOwnApp(pairId: String, ownUid: String, pkg: String, name: String) = net {
+        apps(pairId, ownUid).document(pkg).set(
+            mapOf("name" to name, "addedBy" to "self", "locked" to true, "unlockUntil" to null)
         ).await()
         true
     }
 
     /** Guardian: lock now (true) or release indefinitely (false). Clears any timed window. */
-    suspend fun setLocked(pairId: String, pkg: String, locked: Boolean) = net {
-        apps(pairId).document(pkg).update("locked", locked, "unlockUntil", null).await()
+    suspend fun setLocked(pairId: String, phoneUid: String, pkg: String, locked: Boolean) = net {
+        apps(pairId, phoneUid).document(pkg).update("locked", locked, "unlockUntil", null).await()
         true
     }
 
     /** Guardian: keep locked by default but open until [untilMillis]. */
-    suspend fun unlockUntil(pairId: String, pkg: String, untilMillis: Long) = net {
-        apps(pairId).document(pkg).update("locked", true, "unlockUntil", untilMillis).await()
+    suspend fun unlockUntil(pairId: String, phoneUid: String, pkg: String, untilMillis: Long) = net {
+        apps(pairId, phoneUid).document(pkg).update("locked", true, "unlockUntil", untilMillis).await()
         true
     }
 
-    suspend fun removeApp(pairId: String, pkg: String) = net {
-        apps(pairId).document(pkg).delete().await()
+    suspend fun removeApp(pairId: String, phoneUid: String, pkg: String) = net {
+        apps(pairId, phoneUid).document(pkg).delete().await()
         true
     }
 
     suspend fun sendHeartbeat(pairId: String, s: Perms.Snapshot) = net {
-        uid()
-        pairs().document(pairId).update(
+        val uid = uid()
+        phone(pairId, uid).set(
             mapOf(
-                "health.lastHeartbeat" to FieldValue.serverTimestamp(),
-                "health.accessibilityOn" to s.accessibility,
-                "health.batteryExempt" to s.batteryExempt,
-                "health.deviceAdmin" to s.deviceAdmin,
-                "health.notificationsOn" to s.notifications,
+                "lastHeartbeat" to FieldValue.serverTimestamp(),
+                "accessibilityOn" to s.accessibility,
+                "batteryExempt" to s.batteryExempt,
+                "deviceAdmin" to s.deviceAdmin,
+                "notificationsOn" to s.notifications,
+                "usageAccess" to s.usageAccess,
+                "hardened" to s.hardened,
+            ),
+            SetOptions.merge(),
+        ).await()
+        true
+    }
+
+    suspend fun pushUsage(pairId: String, day: UsageDay) = net {
+        val uid = uid()
+        phone(pairId, uid).collection("usage").document(day.date).set(
+            mapOf(
+                "total" to day.totalMs,
+                "top" to day.apps.map { mapOf("pkg" to it.pkg, "name" to it.name, "ms" to it.ms) },
+                "updatedAt" to FieldValue.serverTimestamp(),
             )
         ).await()
         true
@@ -165,20 +228,20 @@ object PairRepository {
 
     private fun DocumentSnapshot.toPair(): PairInfo? {
         if (!exists()) return null
-        val guardian = getString("guardianUid") ?: return null
-        @Suppress("UNCHECKED_CAST")
-        val h = get("health") as? Map<String, Any?> ?: emptyMap()
-        return PairInfo(
-            id = id,
-            guardianUid = guardian,
-            guardedUid = getString("guardedUid"),
-            health = Health(
-                lastHeartbeat = (h["lastHeartbeat"] as? Timestamp)?.toDate()?.time,
-                accessibilityOn = h["accessibilityOn"] == true,
-                batteryExempt = h["batteryExempt"] == true,
-                deviceAdmin = h["deviceAdmin"] == true,
-                notificationsOn = h["notificationsOn"] == true,
-            ),
+        val creator = getString("a") ?: return null
+        return PairInfo(id = id, creatorUid = creator, joinerUid = getString("b"))
+    }
+
+    private fun DocumentSnapshot.toHealth(): Health? {
+        if (!exists()) return null
+        return Health(
+            lastHeartbeat = (get("lastHeartbeat") as? Timestamp)?.toDate()?.time,
+            accessibilityOn = getBoolean("accessibilityOn") == true,
+            batteryExempt = getBoolean("batteryExempt") == true,
+            deviceAdmin = getBoolean("deviceAdmin") == true,
+            notificationsOn = getBoolean("notificationsOn") == true,
+            usageAccess = getBoolean("usageAccess") == true,
+            hardened = getBoolean("hardened") == true,
         )
     }
 
@@ -189,4 +252,15 @@ object PairRepository {
         unlockUntil = getLong("unlockUntil"),
         addedBy = getString("addedBy") ?: "",
     )
+
+    private fun DocumentSnapshot.toUsageDay(): UsageDay {
+        val list = get("top") as? List<*> ?: emptyList<Any>()
+        val apps = list.mapNotNull { item ->
+            @Suppress("UNCHECKED_CAST")
+            val m = item as? Map<String, Any?> ?: return@mapNotNull null
+            val pkg = m["pkg"] as? String ?: return@mapNotNull null
+            AppUsage(pkg, m["name"] as? String ?: pkg, (m["ms"] as? Number)?.toLong() ?: 0L)
+        }
+        return UsageDay(date = id, totalMs = getLong("total") ?: 0L, apps = apps)
+    }
 }

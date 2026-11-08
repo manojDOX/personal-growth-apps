@@ -10,20 +10,21 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.selfapps.guardlock.data.PairRepository
 import com.selfapps.guardlock.data.Prefs
-import com.selfapps.guardlock.data.Role
 import com.selfapps.guardlock.lock.Perms
+import com.selfapps.guardlock.usage.UsageSync
 import java.util.concurrent.TimeUnit
 
 /**
- * Check-in every ~15 min (WorkManager's minimum). The guardian's app treats a long silence as
- * "phone offline or protection killed". It also doubles as a watchdog that restarts SyncService.
+ * Check-in every ~15 min (WorkManager's minimum). The partner's app treats a long silence as
+ * "phone offline or protection killed". It also uploads screen time, and doubles as a watchdog
+ * that restarts SyncService.
  */
 class HeartbeatWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
-        val pairId = Prefs.pairId
-        if (Prefs.role != Role.GUARDED || pairId == null) return Result.success()
+        val pairId = Prefs.pairId ?: return Result.success()
         return try {
             PairRepository.sendHeartbeat(pairId, Perms.snapshot(applicationContext))
+            runCatching { UsageSync.push(applicationContext) } // never fail the heartbeat over stats
             runCatching { SyncService.start(applicationContext) } // watchdog; may be disallowed in background
             Result.success()
         } catch (e: Exception) {
@@ -39,6 +40,10 @@ class HeartbeatWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
                 "heartbeat", ExistingPeriodicWorkPolicy.KEEP, request
             )
+        }
+
+        fun cancel(ctx: Context) {
+            WorkManager.getInstance(ctx).cancelUniqueWork("heartbeat")
         }
     }
 }

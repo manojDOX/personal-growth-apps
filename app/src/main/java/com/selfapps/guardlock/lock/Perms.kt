@@ -7,7 +7,9 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import com.selfapps.guardlock.service.GuardDeviceAdmin
+import com.selfapps.guardlock.service.Hardening
 import com.selfapps.guardlock.service.LockAccessibilityService
+import com.selfapps.guardlock.usage.UsageCollector
 
 /** Health checks for everything the lock depends on. Also what the heartbeat reports. */
 object Perms {
@@ -16,8 +18,11 @@ object Perms {
         val batteryExempt: Boolean,
         val deviceAdmin: Boolean,
         val notifications: Boolean,
+        val usageAccess: Boolean,
+        /** Device-owner mode: new users, profiles, safe mode and uninstall are blocked by Android. */
+        val hardened: Boolean,
     ) {
-        val allGood get() = accessibility && batteryExempt && deviceAdmin && notifications
+        val allGood get() = accessibility && batteryExempt && deviceAdmin && notifications && usageAccess
     }
 
     fun snapshot(ctx: Context) = Snapshot(
@@ -25,6 +30,8 @@ object Perms {
         batteryExempt = batteryExempt(ctx),
         deviceAdmin = deviceAdmin(ctx),
         notifications = NotificationManagerCompat.from(ctx).areNotificationsEnabled(),
+        usageAccess = UsageCollector.hasAccess(ctx),
+        hardened = Hardening.isDeviceOwner(ctx),
     )
 
     fun accessibilityOn(ctx: Context): Boolean {

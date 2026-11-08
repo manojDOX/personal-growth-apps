@@ -1,76 +1,106 @@
 rules_version = '2';
 
-// Enforces "easy to lock, hard to unlock" on the SERVER, so a modified guarded-side APK
-// cannot cheat: the guarded user can only add locks, never loosen or remove them.
+// Two-way pairing: every phone in a pair is guarded by the other one.
+//
+// Data layout
+//   pairs/{pairId}                       a (creator uid), b (joiner uid | null), createdAt
+//   pairs/{pairId}/phones/{uid}          health of ONE phone (written only by that phone)
+//   pairs/{pairId}/phones/{uid}/apps/*   apps locked ON that phone
+//   pairs/{pairId}/phones/{uid}/usage/*  screen time of that phone, one doc per day
+//
+// "Easy to lock, hard to unlock" is enforced here, on the SERVER: the owner of a phone can only
+// add locks; only the OTHER member of the pair can loosen or remove them.
 service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() {
       return request.auth != null;
     }
-    function pairData(pairId) {
+    function pairDoc(pairId) {
       return get(/databases/$(database)/documents/pairs/$(pairId)).data;
     }
-    function isGuardianOf(pairId) {
-      return signedIn() && pairData(pairId).guardianUid == request.auth.uid;
+    function isMember(pairId) {
+      return signedIn() && (pairDoc(pairId).a == request.auth.uid || pairDoc(pairId).b == request.auth.uid);
     }
-    function isGuardedOf(pairId) {
-      return signedIn() && pairData(pairId).guardedUid == request.auth.uid;
+    // The signed-in user is the phone's owner (and a member of the pair).
+    function isOwner(pairId, phone) {
+      return signedIn() && request.auth.uid == phone && isMember(pairId);
+    }
+    // The signed-in user is the OTHER member: the guardian of that phone.
+    function isGuardianOf(pairId, phone) {
+      return isMember(pairId)
+        && request.auth.uid != phone
+        && (pairDoc(pairId).a == phone || pairDoc(pairId).b == phone);
     }
 
     match /pairs/{pairId} {
-      // Anyone signed in may fetch an UNCLAIMED pair by its (unguessable, 8-char) id in
-      // order to join it. Listing/querying is never allowed.
+      // Anyone signed in may fetch an UNCLAIMED pair by its (unguessable, 8-char) id to join it.
+      // Listing/querying is never allowed.
       // (resource == null: a missing doc reads as "not found" instead of "permission denied".)
       allow get: if signedIn() && (
         resource == null ||
-        resource.data.guardedUid == null ||
-        resource.data.guardianUid == request.auth.uid ||
-        resource.data.guardedUid == request.auth.uid
+        resource.data.b == null ||
+        resource.data.a == request.auth.uid ||
+        resource.data.b == request.auth.uid
       );
       allow list: if false;
 
       allow create: if signedIn()
-        && request.resource.data.guardianUid == request.auth.uid
-        && request.resource.data.guardedUid == null
-        && request.resource.data.keys().hasOnly(['guardianUid', 'guardedUid', 'createdAt', 'health']);
+        && request.resource.data.a == request.auth.uid
+        && request.resource.data.b == null
+        && request.resource.data.keys().hasOnly(['a', 'b', 'createdAt']);
 
-      allow update: if signedIn() && (
-        // guardian: anything except changing who the guardian is
-        (resource.data.guardianUid == request.auth.uid
-          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['guardianUid']))
-        // friend joins an unclaimed pair
-        || (resource.data.guardedUid == null
-          && request.resource.data.guardedUid == request.auth.uid
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['guardedUid']))
-        // guarded phone reports heartbeat / health only
-        || (resource.data.guardedUid == request.auth.uid
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['health']))
-      );
+      // Only the second phone can join, only once, and only by filling in "b".
+      allow update: if signedIn()
+        && resource.data.b == null
+        && resource.data.a != request.auth.uid
+        && request.resource.data.b == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['b']);
 
       allow delete: if false;
-    }
 
-    match /pairs/{pairId}/apps/{pkg} {
-      allow read: if isGuardianOf(pairId) || isGuardedOf(pairId);
+      // ---------- health ----------
+      match /phones/{phone} {
+        allow read: if isMember(pairId);
+        allow create, update: if isOwner(pairId, phone)
+          && request.resource.data.keys().hasOnly([
+            'lastHeartbeat', 'accessibilityOn', 'batteryExempt', 'deviceAdmin',
+            'notificationsOn', 'usageAccess', 'hardened'
+          ]);
+        allow delete: if false;
 
-      allow create: if isGuardianOf(pairId) || (
-        isGuardedOf(pairId)
-        && request.resource.data.keys().hasOnly(['name', 'addedBy', 'locked', 'unlockUntil'])
-        && request.resource.data.addedBy == 'guarded'
-        && request.resource.data.locked == true
-        && request.resource.data.get('unlockUntil', null) == null
-      );
+        // ---------- locked apps ----------
+        match /apps/{pkg} {
+          allow read: if isMember(pairId);
 
-      // Guarded side may only (re)lock: locked must end up true with no open window.
-      allow update: if isGuardianOf(pairId) || (
-        isGuardedOf(pairId)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'locked', 'unlockUntil'])
-        && request.resource.data.locked == true
-        && request.resource.data.get('unlockUntil', null) == null
-      );
+          allow create: if isGuardianOf(pairId, phone) || (
+            isOwner(pairId, phone)
+            && request.resource.data.keys().hasOnly(['name', 'addedBy', 'locked', 'unlockUntil'])
+            && request.resource.data.addedBy == 'self'
+            && request.resource.data.locked == true
+            && request.resource.data.get('unlockUntil', null) == null
+          );
 
-      allow delete: if isGuardianOf(pairId);
+          // The owner may only (re)lock: locked must end up true with no open window.
+          allow update: if isGuardianOf(pairId, phone) || (
+            isOwner(pairId, phone)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'locked', 'unlockUntil'])
+            && request.resource.data.locked == true
+            && request.resource.data.get('unlockUntil', null) == null
+          );
+
+          allow delete: if isGuardianOf(pairId, phone);
+        }
+
+        // ---------- screen time ----------
+        match /usage/{day} {
+          allow read: if isMember(pairId);
+          allow create, update: if isOwner(pairId, phone)
+            && request.resource.data.keys().hasOnly(['total', 'top', 'updatedAt'])
+            && request.resource.data.top.size() <= 30;
+          allow delete: if false;
+        }
+      }
     }
   }
 }

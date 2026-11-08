@@ -1,21 +1,53 @@
-# GuardLock (Phase 1)
+# GuardLock
 
-An Android app where a **guardian** (your friend) controls which apps are locked on **your** phone.
-Same APK, two roles. Costs ₹0: Firebase free plan, no server code, sideloaded APK.
+An Android app where **two friends guard each other**. Each phone can lock apps on the other
+phone, and each phone sees the other's screen time. Same APK on both phones.
+Costs 0: Firebase free plan, no server code, sideloaded APK.
 
-Rule of the app: **easy to lock, hard to unlock.** You can add apps to the lock list, but only the
-guardian can unlock or remove them - enforced by Firestore security rules, not just the UI.
+Rule of the app: **easy to lock, hard to unlock.** You can add apps to the lock list on your own
+phone, but only your partner can unlock or remove them. Firestore security rules enforce this,
+not just the UI.
 
-## What Phase 1 does
-- Role pick (guardian / guarded) and pairing by an 8-character code
-- Guarded user picks apps to lock; the lock screen covers them (Accessibility service)
-- Guardian sees the list live and can Lock / Unlock / "Open for 15 min, 1 h, until midnight" / Remove
-- Guarded phone sends a heartbeat (WorkManager ~15 min + on service start); guardian sees
-  protected / weakened / offline status
-- Rules are cached, so locks keep working offline and after reboot (fail-closed)
+## What it does
+- **Two-way pairing** with an 8-character code. One phone makes the code, the other enters it.
+- **My phone tab**: setup checklist, add apps to lock, list of what is locked on this phone.
+- **Partner tab**: partner's health (protected / weakened / offline), and for each app locked on
+  their phone: Lock / Unlock / "Open for 15 min, 1 h, until midnight" / Remove.
+- **Compare tab**: screen time, you vs partner: today, last 7 days, and top apps today.
+- **No new-user bypass**: adding Android users, guests and profiles is blocked (see below).
+- Locks are cached, so they keep working offline and after reboot (fail-closed).
 
-Not yet (Phases 2-5): unlock requests, usage/attempt stats, consistency calendar, tamper alerts,
-schedules.
+## Screen time
+Needs the **Usage access** permission (setup card -> Screen time). Android keeps the usage log;
+GuardLock reads it every ~15 min and when you open the app, and uploads only totals per app
+for the last 7 days. Your partner sees these numbers. Free-plan cost is far below the quotas.
+
+## Blocking new Android users
+A new Android user (or guest, or work profile) does not have GuardLock installed, so it would
+bypass every lock. Two levels:
+
+1. **Basic (automatic).** The accessibility service closes the Settings screens for adding a
+   user, guest or profile. It depends on the screen text of your phone brand, so treat it as a
+   speed bump. The partner's Health card shows "Strong mode off".
+2. **Strong mode (optional, recommended).** Make GuardLock the phone's *device owner* once, over
+   USB. Then Android itself refuses: adding users, switching users, work/clone profiles,
+   **safe mode**, and uninstalling GuardLock.
+
+   ```
+   adb shell dpm set-device-owner com.selfapps.guardlock/.service.GuardDeviceAdmin
+   ```
+   Requirements: USB debugging on; **no Google/Samsung account signed in on the phone while you
+   run it** (remove them, run the command, add them back); no extra users on the phone.
+   To undo it you must factory-reset the phone, so only do this if both of you agree.
+
+## Battery and memory
+- The accessibility service does not poll. It reacts to window changes, to new rules arriving,
+  and to one timer when a timed unlock ends.
+- Screen time is read from Android's own log. No background collector runs.
+- One WorkManager job (~15 min) uploads health and screen time. One foreground service holds
+  the rules listener, which is what makes a partner's Lock/Unlock arrive in about a second.
+- Native Kotlin + Compose: no cross-platform runtime. Release minification is off on purpose
+  until it can be tested on real phones.
 
 ## One-time setup
 
@@ -31,13 +63,14 @@ schedules.
    that asks for a billing account.
 
 ## Trying it
-1. Phone A: open app -> **I'm the guardian** -> note the code.
-2. Phone B: open app -> **I'm being guarded** -> enter the code.
-3. Phone B: finish the setup card (Accessibility, notifications, battery, uninstall protection).
-   On Android 13+ a sideloaded app needs *Settings -> Apps -> GuardLock -> ⋮ -> Allow restricted
-   settings* before the Accessibility switch becomes usable.
+1. Phone A: open app -> **Start - make my pairing code**.
+2. Phone B: open app -> enter the code -> **Pair with my friend**.
+3. Both phones: *My phone* tab -> finish the setup card (Accessibility, Screen time,
+   notifications, battery, uninstall protection). On Android 13+ a sideloaded app needs
+   *Settings -> Apps -> GuardLock -> ⋮ -> Allow restricted settings* first.
 4. Phone B: *Add apps to lock*, pick one, open it -> lock screen.
-5. Phone A: toggle the switch / "Open for…" -> Phone B's app opens within ~2 s.
+5. Phone A: *Partner* tab -> toggle / "Open for…" -> Phone B's app opens within ~2 s.
+6. Both: *Compare* tab -> your bars and your partner's bars.
 
 ## CI/CD (GitHub Actions)
 
@@ -78,11 +111,12 @@ Service account: Google Cloud console -> IAM -> Service accounts -> create, gran
 In Firebase console -> App Distribution -> Testers & Groups, create a group with alias `testers` and
 add yourself and your friend. Testers get an email/app notification for each new build.
 
-## Known Phase 1 limitations (all planned)
+## Known limitations (all planned)
 - **Anonymous accounts**: clearing the app's data or reinstalling loses the identity, so the pair
-  breaks. Phase 4 will add account linking. For now use the guardian's *Unpair (dev only)* and
+  breaks. Phase 4 will add account linking. For now use *Unpair (dev only)* on both phones and
   start over.
 - **Timed unlocks** use the guardian phone's clock for the deadline (the guarded phone converts it
   to a monotonic timer on receipt). Phase 4 moves this to server time.
-- **Force-stop / safe mode / uninstall** are detected (heartbeat goes quiet) but not prevented.
+- **Force-stop / safe mode / uninstall** are detected (heartbeat goes quiet) but only prevented in
+  Strong mode.
 - Not Play-Store ready: Accessibility use needs a declaration form. Sideload for now.

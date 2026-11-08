@@ -11,10 +11,11 @@ object Prefs {
         sp = ctx.applicationContext.getSharedPreferences("guardlock", Context.MODE_PRIVATE)
     }
 
-    var role: Role?
-        get() = sp.getString("role", null)?.let { runCatching { Role.valueOf(it) }.getOrNull() }
+    /** Data layout version. Older layouts (one-way guardian/guarded) are wiped on upgrade. */
+    var schema: Int
+        get() = sp.getInt("schema", 0)
         set(value) {
-            sp.edit().putString("role", value?.name).apply()
+            sp.edit().putInt("schema", value).apply()
         }
 
     var pairId: String?
@@ -29,6 +30,13 @@ object Prefs {
         set(value) {
             sp.edit().putString("rules", value).apply()
         }
+
+    /** Total (ms) last uploaded for a day, or -1 if that day was never uploaded. */
+    fun usagePushed(date: String): Long = sp.getLong("u_$date", -1L)
+
+    fun setUsagePushed(date: String, totalMs: Long) {
+        sp.edit().putLong("u_$date", totalMs).apply()
+    }
 
     fun clear() {
         sp.edit().clear().apply()
