@@ -8,7 +8,6 @@ import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
-import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.selfapps.guardlock.lock.Perms
 import kotlinx.coroutines.channels.awaitClose
@@ -19,6 +18,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.SecureRandom
+import java.time.LocalDate
 
 /**
  * All Firestore access. No server code: the security rules in firestore.rules are what stop a
@@ -156,8 +156,8 @@ object PairRepository {
 
     private fun rawUsageFlow(pairId: String, phoneUid: String): Flow<List<UsageDay>> = callbackFlow {
         val reg = phone(pairId, phoneUid).collection("usage")
-            .orderBy(FieldPath.documentId(), Query.Direction.DESCENDING)
-            .limit(7)
+            // Range filter on the doc id (an ISO date). Needs no custom index, unlike orderBy+limit.
+            .whereGreaterThanOrEqualTo(FieldPath.documentId(), LocalDate.now().minusDays(7).toString())
             .addSnapshotListener { snap, err ->
                 if (err != null) {
                     close(err)
